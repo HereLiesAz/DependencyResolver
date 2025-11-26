@@ -78,7 +78,7 @@ suspend fun ProjectObjectModel.resolveDependencies(
     managedDependencies.addAll(dependencyManagement?.dependencies.orEmpty().map {
         // Ensure parent's GAV is used if child's GAV is missing
         val actualGroupId = it.groupId ?: groupId ?: parent?.groupId ?: throw IllegalStateException("GroupId missing for managed dependency ${it.artifactId}")
-        Artifact(actualGroupId, it.artifactId, it.version ?: "")
+        Artifact(actualGroupId, it.artifactId, it.version ?: "", it.classifier)
     })
     val deps = ConcurrentLinkedDeque<Artifact>()
     dependencies.orEmpty().filterNot {
@@ -93,7 +93,7 @@ suspend fun ProjectObjectModel.resolveDependencies(
         val depArtifactId = dependency.artifactId
 
         // Create the artifact instance for this dependency
-        val artifact = Artifact(depGroupId, depArtifactId, dependency.version ?: "")
+        val artifact = Artifact(depGroupId, depArtifactId, dependency.version ?: "", dependency.classifier)
 
         val originalGroupIdForEvent = this.groupId ?: parent?.groupId ?: "unknown.parent.groupId"
         val originalArtifactIdForEvent = this.artifactId
@@ -352,7 +352,7 @@ suspend fun downloadArtifacts(output: File, artifacts: List<Artifact>) {
         if (artifact.repository == null) {
             initHost(artifact)
         }
-        val artifactFile = File(output, "${artifact.artifactId}-${artifact.version}.${artifact.extension}")
+        val artifactFile = artifact.getLocalPath(output)
         if (!artifactFile.exists()) {
             artifact.downloadTo(artifactFile)
         }
