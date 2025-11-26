@@ -32,11 +32,164 @@ data class Artifact(
     var dependencies: List<Artifact>? = null
     var pom: ProjectObjectModel? = null
 
+    @Deprecated("Use downloadArtifacts(output, artifacts) instead", ReplaceWith("downloadArtifacts(output, getAllDependencies())"))
+    suspend fun downloadArtifact(output: File) {
+        output.mkdirs()
+        // Ensure dependencies are resolved and consolidated before downloading
+        val allArtifactsToDownload = (getAllDependencies() + this).toSet()
+
+        allArtifactsToDownload.forEach { artifact ->
+            val artifactFile = File(output, "${artifact.artifactId}-${artifact.version}.${artifact.extension}")
+            if (!artifactFile.exists()) {
+                artifact.downloadTo(artifactFile)
+            }
+        }
+    }
+
+    @Deprecated("Use resolveDependencies(projectDir) instead")
+    suspend fun getAllDependencies(): Set<Artifact> {
+        if (this.dependencies == null) { // Ensure the dependency tree is resolved for the starting artifact
+            resolveDependencyTree()
+        }
+
+        val allResolvedArtifactsInGraph = mutableSetOf<Artifact>()
+        val queue = ArrayDeque<Artifact>()
+
+        // Start BFS from the direct dependencies of the current artifact
+        this.dependencies?.forEach { queue.add(it) }
+
+        val visitedForTraversal = mutableSetOf<Artifact>() // Prevents cycles during full graph traversal
+
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            if (visitedForTraversal.add(current)) { // Relies on Artifact's equals/hashCode (including version)
+                allResolvedArtifactsInGraph.add(current)
+                current.dependencies?.forEach { dep ->
+                    if (!visitedForTraversal.contains(dep)) {
+                        queue.add(dep)
+                    }
+                }
+            }
+        }
+
+        // Now, consolidate to the newest version for each groupId:artifactId
+        val newestArtifactsMap = mutableMapOf<Pair<String, String>, Artifact>()
+        for (artifact in allResolvedArtifactsInGraph) {
+            val key = Pair(artifact.groupId, artifact.artifactId)
+            val existing = newestArtifactsMap[key]
+            if (existing == null || Version(artifact.version).isHigherThan(existing.version)) {
+                newestArtifactsMap[key] = artifact
+            }
+        }
+        return newestArtifactsMap.values.toSet()
+    }
+
     fun showDependencyTree(depth: Int = 0) {
         println("    ".repeat(depth) + this)
         dependencies?.forEach { dep ->
             dep.showDependencyTree(depth + 1)
         }
+    }
+
+    @Deprecated("Use resolveDependencies(projectDir) instead")
+    suspend fun resolve(
+        resolved: ConcurrentHashMap<Pair<String, String>, Pair<Artifact, ConcurrentLinkedDeque<Artifact>>>,
+        managedDependencies: ConcurrentLinkedDeque<Artifact>
+    ) {
+        if (this.dependencies != null) {
+            eventReciever.onSkippingResolution(this)
+            return
+        }
+
+        val key = Pair(groupId, artifactId)
+        val cachedEntry = resolved[key]
+
+        if (cachedEntry != null) {
+            val cachedArtifactInstance = cachedEntry.first
+            val cachedDependencies = cachedEntry.second
+            
+            if (Version(this.version).isLowerThan(cachedArtifactInstance.version)) {
+                this.dependencies = emptyList()
+                eventReciever.onSkippingResolution(this)
+                eventReciever.logger.info("Skipping $this - older than cached version ${cachedArtifactInstance.version}")
+                return
+            } else if (this.version == cachedArtifactInstance.version) {
+                this.dependencies = cachedDependencies.toList() // Reuse dependencies
+                eventReciever.onSkippingResolution(this)
+                eventReciever.logger.info("Skipping $this - same as cached version, reusing dependencies")
+                return
+            }
+            // If current version is newer (comparisonResult > 0), proceed to resolve it.
+            // The cache will be updated with this newer version.
+            eventReciever.logger.info("Proceeding with $this - newer than cached version ${cachedArtifactInstance.version}")
+        }
+
+        if (repository == null) {
+            org.cosmic.ide.dependency.resolver.initHost(this)
+            if (repository == null) {
+                this.dependencies = emptyList()
+                resolved[key] = Pair(this, ConcurrentLinkedDeque()) // Cache unresolvable state
+                throw IllegalStateException("Repository is not declared for $groupId:$artifactId:$version and could not be initialized.")
+            }
+        }
+        
+        val pomFile = getPOM()
+        if (pomFile == null) {
+            this.dependencies = emptyList()
+            resolved[key] = Pair(this, ConcurrentLinkedDeque()) // Cache no POM/deps state
+            eventReciever.onInvalidPOM(this)
+            return
+        }
+
+        val directDependencies = pomFile.resolveDependencies(resolved, managedDependencies)
+        this.dependencies = directDependencies.toList()
+        if (this.dependencies?.isEmpty() == true) {
+            eventReciever.onDependenciesNotFound(this)
+        }
+        resolved[key] = Pair(this, directDependencies) // Update cache with this version
+        eventReciever.onResolutionComplete(this)
+    }
+
+    @Deprecated("Use resolveDependencies(projectDir) instead")
+    suspend fun resolveDependencyTree(
+        resolved: ConcurrentHashMap<Pair<String, String>, Pair<Artifact, ConcurrentLinkedDeque<Artifact>>> = ConcurrentHashMap(),
+        managedDependencies: ConcurrentLinkedDeque<Artifact> = ConcurrentLinkedDeque(),
+        resolutionStack: MutableList<Pair<String, String>> = mutableListOf()
+    ) {
+        val currentKey = Pair(this.groupId, this.artifactId)
+        if (resolutionStack.contains(currentKey)) {
+            eventReciever.logger.warning("Cycle detected in dependency graph: ${resolutionStack.joinToString(" -> ")} -> $currentKey. Skipping resolution for $this to break the cycle.")
+            this.dependencies = emptyList()
+            return
+        }
+
+        resolutionStack.add(currentKey)
+
+        val queue = ArrayDeque<Artifact>()
+        queue.add(this)
+
+        val visitedInThisCall = mutableSetOf<Artifact>()
+        visitedInThisCall.add(this)
+
+        while (queue.isNotEmpty()) {
+            val currentLevelArtifacts = mutableListOf<Artifact>()
+            while(queue.isNotEmpty()) {
+                currentLevelArtifacts.add(queue.removeFirst())
+            }
+
+            currentLevelArtifacts.filter { it.dependencies == null }.parallelForEach { artifact ->
+                artifact.resolve(resolved, managedDependencies)
+            }
+
+            for (artifact in currentLevelArtifacts) {
+                artifact.dependencies?.forEach { dependency ->
+                    if (visitedInThisCall.add(dependency)) {
+                        queue.add(dependency)
+                    }
+                }
+            }
+        }
+        resolutionStack.remove(currentKey)
     }
 
     fun downloadTo(output: File) {
