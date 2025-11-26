@@ -7,14 +7,13 @@
 
 package org.cosmic.ide.dependency.resolver.api
 
+import io.github.g00fy2.versioncompare.Version
 import okhttp3.Request
 import org.cosmic.ide.dependency.resolver.eventReciever
 import org.cosmic.ide.dependency.resolver.okHttpClient
 import org.cosmic.ide.dependency.resolver.resolveDependencies
 import org.cosmic.ide.dependency.resolver.xmlDeserializer
 import org.cosmic.ide.dependency.resolver.parallelForEach
-import org.cosmic.ide.dependency.resolver.getNewerVersion
-// import org.cosmic.ide.dependency.resolver.compareVersions // Make sure this utility is available
 import java.io.File
 import java.io.IOException
 import java.net.SocketException
@@ -33,6 +32,7 @@ data class Artifact(
     var dependencies: List<Artifact>? = null
     var pom: ProjectObjectModel? = null
 
+    @Deprecated("Use downloadArtifacts(output, artifacts) instead", ReplaceWith("downloadArtifacts(output, getAllDependencies())"))
     suspend fun downloadArtifact(output: File) {
         output.mkdirs()
         // Ensure dependencies are resolved and consolidated before downloading
@@ -46,6 +46,7 @@ data class Artifact(
         }
     }
 
+    @Deprecated("Use resolveDependencies(projectDir) instead")
     suspend fun getAllDependencies(): Set<Artifact> {
         if (this.dependencies == null) { // Ensure the dependency tree is resolved for the starting artifact
             resolveDependencyTree()
@@ -75,16 +76,9 @@ data class Artifact(
         val newestArtifactsMap = mutableMapOf<Pair<String, String>, Artifact>()
         for (artifact in allResolvedArtifactsInGraph) {
             val key = Pair(artifact.groupId, artifact.artifactId)
-            val existingNewest = newestArtifactsMap[key]
-
-            if (existingNewest == null) {
+            val existing = newestArtifactsMap[key]
+            if (existing == null || Version(artifact.version).isHigherThan(existing.version)) {
                 newestArtifactsMap[key] = artifact
-            } else {
-                // Assuming getNewerVersion returns the actual string of the newer version
-                val newerVersionString = getNewerVersion(existingNewest.version, artifact.version)
-                if (newerVersionString == artifact.version && existingNewest.version != artifact.version) {
-                    newestArtifactsMap[key] = artifact
-                }
             }
         }
         return newestArtifactsMap.values.toSet()
@@ -97,6 +91,7 @@ data class Artifact(
         }
     }
 
+    @Deprecated("Use resolveDependencies(projectDir) instead")
     suspend fun resolve(
         resolved: ConcurrentHashMap<Pair<String, String>, Pair<Artifact, ConcurrentLinkedDeque<Artifact>>>,
         managedDependencies: ConcurrentLinkedDeque<Artifact>
@@ -113,21 +108,12 @@ data class Artifact(
             val cachedArtifactInstance = cachedEntry.first
             val cachedDependencies = cachedEntry.second
             
-            // Placeholder: Implement compareVersions(v1: String, v2: String): Int in utils.kt
-            // It should return < 0 if v1 < v2, 0 if v1 == v2, > 0 if v1 > v2
-            // For now, using getNewerVersion as a proxy, needs refinement with compareVersions
-            val comparisonResult: Int = when {
-                getNewerVersion(this.version, cachedArtifactInstance.version) == this.version && this.version != cachedArtifactInstance.version -> 1 // this is newer
-                getNewerVersion(this.version, cachedArtifactInstance.version) == cachedArtifactInstance.version && this.version != cachedArtifactInstance.version -> -1 // this is older
-                else -> 0 // versions are the same
-            }
-
-            if (comparisonResult < 0) { // Current artifact is older than the cached one
+            if (Version(this.version).isLowerThan(cachedArtifactInstance.version)) {
                 this.dependencies = emptyList()
                 eventReciever.onSkippingResolution(this)
                 eventReciever.logger.info("Skipping $this - older than cached version ${cachedArtifactInstance.version}")
                 return
-            } else if (comparisonResult == 0) { // Current artifact is the same version as the cached one
+            } else if (this.version == cachedArtifactInstance.version) {
                 this.dependencies = cachedDependencies.toList() // Reuse dependencies
                 eventReciever.onSkippingResolution(this)
                 eventReciever.logger.info("Skipping $this - same as cached version, reusing dependencies")
@@ -164,14 +150,25 @@ data class Artifact(
         eventReciever.onResolutionComplete(this)
     }
 
+    @Deprecated("Use resolveDependencies(projectDir) instead")
     suspend fun resolveDependencyTree(
         resolved: ConcurrentHashMap<Pair<String, String>, Pair<Artifact, ConcurrentLinkedDeque<Artifact>>> = ConcurrentHashMap(),
-        managedDependencies: ConcurrentLinkedDeque<Artifact> = ConcurrentLinkedDeque()
+        managedDependencies: ConcurrentLinkedDeque<Artifact> = ConcurrentLinkedDeque(),
+        resolutionStack: MutableList<Pair<String, String>> = mutableListOf()
     ) {
-        val queue = ArrayDeque<Artifact>()
-        queue.add(this) 
+        val currentKey = Pair(this.groupId, this.artifactId)
+        if (resolutionStack.contains(currentKey)) {
+            eventReciever.logger.warning("Cycle detected in dependency graph: ${resolutionStack.joinToString(" -> ")} -> $currentKey. Skipping resolution for $this to break the cycle.")
+            this.dependencies = emptyList()
+            return
+        }
 
-        val visitedInThisCall = mutableSetOf<Artifact>() // Tracks G:A:V for the current call context
+        resolutionStack.add(currentKey)
+
+        val queue = ArrayDeque<Artifact>()
+        queue.add(this)
+
+        val visitedInThisCall = mutableSetOf<Artifact>()
         visitedInThisCall.add(this)
 
         while (queue.isNotEmpty()) {
@@ -186,12 +183,13 @@ data class Artifact(
 
             for (artifact in currentLevelArtifacts) {
                 artifact.dependencies?.forEach { dependency ->
-                    if (visitedInThisCall.add(dependency)) { // Add G:A:V to queue if not visited in this *specific* call
+                    if (visitedInThisCall.add(dependency)) {
                         queue.add(dependency)
                     }
                 }
             }
         }
+        resolutionStack.remove(currentKey)
     }
 
     fun downloadTo(output: File) {
