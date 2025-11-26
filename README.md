@@ -1,4 +1,5 @@
-# DependencyResolver
+# DependencyResolverr
+[![](https://jitpack.io/v/HereLiesAz/DependencyResolverr.svg)](https://jitpack.io/#HereLiesAz/DependencyResolverr)
 
 A powerful and lightweight dependency resolution library for Maven and Gradle projects.
 
