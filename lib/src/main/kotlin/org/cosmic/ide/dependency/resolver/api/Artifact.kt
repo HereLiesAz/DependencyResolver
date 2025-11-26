@@ -21,10 +21,21 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
 import kotlin.collections.ArrayDeque
 
+/**
+ * Represents a Maven artifact.
+ *
+ * @property groupId The group ID of the artifact.
+ * @property artifactId The artifact ID of the artifact.
+ * @property version The version of the artifact.
+ * @property classifier The classifier of the artifact (e.g., "sources", "javadoc").
+ * @property repository The repository where the artifact is located.
+ * @property extension The extension of the artifact (e.g., "jar", "pom").
+ */
 data class Artifact(
     val groupId: String,
     val artifactId: String,
     var version: String = "",
+    var classifier: String? = null,
     var repository: Repository? = null,
     var extension: String = "jar"
 ) {
@@ -192,30 +203,49 @@ data class Artifact(
         resolutionStack.remove(currentKey)
     }
 
-    fun downloadTo(output: File) {
+    fun getDownloadUrl(): String {
         if (repository == null) {
-            throw IllegalStateException("Repository is not declared for $groupId:$artifactId:$version during downloadTo.")
+            throw IllegalStateException("Repository is not declared for $groupId:$artifactId:$version during URL construction.")
         }
-        output.parentFile?.mkdirs() 
-        output.createNewFile()
-        val dependencyUrl = "${repository!!.getURL()}/${
+        val classifierString = if (!classifier.isNullOrEmpty()) "-$classifier" else ""
+        return "${repository!!.getURL()}/${
             groupId.replace(
                 ".", "/"
             )
-        }/$artifactId/$version/$artifactId-$version.$extension"
+        }/$artifactId/$version/$artifactId-$version$classifierString.$extension"
+    }
+
+    fun downloadTo(output: File) {
+        output.parentFile?.mkdirs()
+        output.createNewFile()
+        val dependencyUrl = getDownloadUrl()
         eventReciever.onDownloadStart(this)
         val request = Request.Builder().url(dependencyUrl).build()
         try {
             okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Unexpected code ${'$'}{response.code} for $dependencyUrl")
+                if (!response.isSuccessful) {
+                    eventReciever.onDownloadError(this, IOException("Failed to download $dependencyUrl: ${response.code}"))
+                    return
+                }
                 response.body.byteStream().use { input ->
                     output.outputStream().use { input.copyTo(it) }
                 }
             }
             eventReciever.onDownloadEnd(this)
-        } catch (e: Exception) {
+        } catch (e: IOException) {
             eventReciever.onDownloadError(this, e)
         }
+    }
+
+    /**
+     * Gets the local path of the artifact.
+     *
+     * @param outputDir The directory where the artifact will be downloaded.
+     * @return The local path of the artifact.
+     */
+    fun getLocalPath(outputDir: File): File {
+        val classifierString = if (classifier != null) "-$classifier" else ""
+        return File(outputDir, "$artifactId-$version$classifierString.$extension")
     }
 
     // Note: getPOM is not suspend, but it calls initHost which might do network I/O implicitly.
@@ -266,13 +296,15 @@ data class Artifact(
     }
 
     override fun toString(): String {
-        return "$groupId:$artifactId:$version"
+        val classifierString = if (classifier != null) ":$classifier" else ""
+        return "$groupId:$artifactId:$version$classifierString"
     }
 
     override fun hashCode(): Int {
         var result = groupId.hashCode()
         result = 31 * result + artifactId.hashCode()
-        result = 31 * result + version.hashCode() // Version included for uniqueness in sets like visitedInThisCall
+        result = 31 * result + version.hashCode()
+        result = 31 * result + (classifier?.hashCode() ?: 0)
         return result
     }
 
@@ -284,7 +316,8 @@ data class Artifact(
 
         if (groupId != other.groupId) return false
         if (artifactId != other.artifactId) return false
-        if (version != other.version) return false // Version included
+        if (version != other.version) return false
+        if (classifier != other.classifier) return false
 
         return true
     }

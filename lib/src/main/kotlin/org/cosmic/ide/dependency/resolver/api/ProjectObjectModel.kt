@@ -59,6 +59,8 @@ data class Dependency(
     val artifactId: String,
     @JacksonXmlProperty(localName = "version")
     val version: String?,
+    @JacksonXmlProperty(localName = "classifier")
+    val classifier: String?,
     @JacksonXmlProperty(localName = "scope")
     val scope: String?,
     @JacksonXmlProperty(localName = "optional")
