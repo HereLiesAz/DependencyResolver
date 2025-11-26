@@ -23,7 +23,7 @@ class MavenResolver : Resolver {
         }
 
         val pom = xmlDeserializer.readValue(pomFile, ProjectObjectModel::class.java)
-        val artifact = Artifact(pom.groupId!!, pom.artifactId, pom.version!!)
+        val artifact = Artifact(requireNotNull(pom.groupId), pom.artifactId, requireNotNull(pom.version))
 
         resolveDependencyTree(artifact)
 

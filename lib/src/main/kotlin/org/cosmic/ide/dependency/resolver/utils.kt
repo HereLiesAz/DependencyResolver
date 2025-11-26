@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.github.g00fy2.versioncompare.Version
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -19,10 +20,12 @@ import org.cosmic.ide.dependency.resolver.api.Artifact
 import org.cosmic.ide.dependency.resolver.api.EventReciever
 import org.cosmic.ide.dependency.resolver.api.ProjectObjectModel
 import org.cosmic.ide.dependency.resolver.api.Repository
+import org.cosmic.ide.dependency.resolver.gradle.GradleResolver
 import org.cosmic.ide.dependency.resolver.repository.GoogleMaven
 import org.cosmic.ide.dependency.resolver.repository.Jitpack
 import org.cosmic.ide.dependency.resolver.repository.MavenCentral
 import org.cosmic.ide.dependency.resolver.repository.SonatypeSnapshots
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -39,6 +42,7 @@ val xmlDeserializer: ObjectMapper = XmlMapper(JacksonXmlModule().apply {
 }).registerKotlinModule().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     .configure(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY, true)
 
+@Deprecated("Use resolveDependencies(projectDir) instead", ReplaceWith("resolveDependencies(projectDir)"))
 fun getArtifact(groupId: String, artifactId: String, version: String): Artifact? {
     val artifact = initHost(Artifact(groupId, artifactId, version)) ?: return null
 
@@ -274,18 +278,18 @@ fun getLatestRangeVersion(
 
         val afterStart = when {
             startVersionString.isEmpty() -> true
-            startInclusive -> io.github.g00fy2.versioncompare.Version(vComparable).isAtLeast(startVersionString)
-            else -> io.github.g00fy2.versioncompare.Version(vComparable).isHigherThan(startVersionString)
+            startInclusive -> Version(vComparable).isAtLeast(startVersionString)
+            else -> Version(vComparable).isHigherThan(startVersionString)
         }
 
         val beforeEnd = when {
             endVersionString.isEmpty() -> true
-            endInclusive -> io.github.g00fy2.versioncompare.Version(vComparable).isLowerThan(endVersionString) || vComparable == endVersionString
-            else -> io.github.g00fy2.versioncompare.Version(vComparable).isLowerThan(endVersionString)
+            endInclusive -> Version(vComparable).isLowerThan(endVersionString) || vComparable == endVersionString
+            else -> Version(vComparable).isLowerThan(endVersionString)
         }
 
         if (afterStart && beforeEnd) {
-            if (bestVersion == null || io.github.g00fy2.versioncompare.Version(vComparable).isHigherThan(bestVersion!!)) {
+            if (bestVersion == null || Version(vComparable).isHigherThan(bestVersion!!)) {
                 bestVersion = vComparable
             }
         }
@@ -303,13 +307,13 @@ fun getLatestRangeVersion(
     if (resolvedVersionFromCache != null) {
          val afterStart = when {
             startVersionString.isEmpty() -> true
-            startInclusive -> io.github.g00fy2.versioncompare.Version(resolvedVersionFromCache).isAtLeast(startVersionString)
-            else -> io.github.g00fy2.versioncompare.Version(resolvedVersionFromCache).isHigherThan(startVersionString)
+            startInclusive -> Version(resolvedVersionFromCache).isAtLeast(startVersionString)
+            else -> Version(resolvedVersionFromCache).isHigherThan(startVersionString)
         }
         val beforeEnd = when {
             endVersionString.isEmpty() -> true
-            endInclusive -> io.github.g00fy2.versioncompare.Version(resolvedVersionFromCache).isLowerThan(endVersionString) || resolvedVersionFromCache == endVersionString
-            else -> io.github.g00fy2.versioncompare.Version(resolvedVersionFromCache).isLowerThan(endVersionString)
+            endInclusive -> Version(resolvedVersionFromCache).isLowerThan(endVersionString) || resolvedVersionFromCache == endVersionString
+            else -> Version(resolvedVersionFromCache).isLowerThan(endVersionString)
         }
         if (afterStart && beforeEnd) return resolvedVersionFromCache
     }
@@ -332,23 +336,23 @@ suspend fun <T> Iterable<T>.parallelForEach(action: suspend (T) -> Unit) = corou
     }.awaitAll()
 }
 
-suspend fun resolveDependencies(projectDir: java.io.File): List<Artifact> {
+suspend fun resolveDependencies(projectDir: File): List<Artifact> {
     val resolver = when {
-        java.io.File(projectDir, "pom.xml").exists() -> MavenResolver()
-        java.io.File(projectDir, "build.gradle").exists() -> org.cosmic.ide.dependency.resolver.gradle.GradleResolver()
-        java.io.File(projectDir, "build.gradle.kts").exists() -> org.cosmic.ide.dependency.resolver.gradle.GradleResolver()
+        File(projectDir, "pom.xml").exists() -> MavenResolver()
+        File(projectDir, "build.gradle").exists() -> GradleResolver()
+        File(projectDir, "build.gradle.kts").exists() -> GradleResolver()
         else -> throw IllegalArgumentException("Unsupported project type")
     }
     return resolver.resolve(projectDir)
 }
 
-suspend fun downloadArtifacts(output: java.io.File, artifacts: List<Artifact>) {
+suspend fun downloadArtifacts(output: File, artifacts: List<Artifact>) {
     output.mkdirs()
     artifacts.parallelForEach { artifact ->
         if (artifact.repository == null) {
             initHost(artifact)
         }
-        val artifactFile = java.io.File(output, "${artifact.artifactId}-${artifact.version}.${artifact.extension}")
+        val artifactFile = File(output, "${artifact.artifactId}-${artifact.version}.${artifact.extension}")
         if (!artifactFile.exists()) {
             artifact.downloadTo(artifactFile)
         }
